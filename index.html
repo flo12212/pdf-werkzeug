@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF Werkzeug</title>
+<style>
+  :root {
+    --bg:#f6f7f9; --fg:#111827; --muted:#6b7280; --line:#dfe3e8;
+    --card:#ffffff; --accent:#2563eb; --gefahr:#dc2626; --markiert:#eff6ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#15171b; --fg:#e8eaed; --muted:#9aa0a6; --line:#2e3238;
+      --card:#1d2024; --accent:#4d8bff; --gefahr:#f87171; --markiert:#1b2740;
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:15px/1.5 -apple-system,"Segoe UI",Roboto,Arial,sans-serif; }
+  header { padding:26px 24px 0; max-width:1100px; margin:0 auto; }
+  h1 { margin:0 0 4px; font-size:26px; letter-spacing:-.02em; }
+  header p { margin:0 0 20px; color:var(--muted); }
+  main { max-width:1100px; margin:0 auto; padding:0 24px 100px; }
+
+  /* Ablegefläche */
+  #ablage { border:2px dashed var(--line); border-radius:12px; background:var(--card);
+            padding:44px 20px; text-align:center; cursor:pointer; transition:.15s; }
+  #ablage:hover, #ablage.drueber { border-color:var(--accent); background:var(--markiert); }
+  #ablage strong { display:block; font-size:17px; margin-bottom:6px; }
+  #ablage span { color:var(--muted); font-size:14px; }
+
+  /* Werkzeugleiste */
+  #leiste { position:sticky; top:0; z-index:5; display:none; gap:10px; flex-wrap:wrap;
+            align-items:center; padding:14px 0; margin-bottom:14px;
+            background:var(--bg); border-bottom:1px solid var(--line); }
+  #leiste .info { color:var(--muted); font-size:14px; margin-right:auto; }
+  button { font:inherit; font-weight:600; cursor:pointer; border:1px solid var(--line);
+           border-radius:8px; padding:8px 14px; background:var(--card); color:var(--fg); }
+  button:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+  button:disabled { opacity:.4; cursor:default; }
+  button.haupt { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.haupt:hover:not(:disabled) { color:#fff; opacity:.9; }
+  button.gefahr:hover:not(:disabled) { border-color:var(--gefahr); color:var(--gefahr); }
+
+  /* Seitenraster */
+  #raster { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:14px; }
+  .seite { position:relative; background:var(--card); border:2px solid var(--line);
+           border-radius:10px; padding:8px; cursor:pointer; user-select:none; }
+  .seite.markiert { border-color:var(--accent); background:var(--markiert); }
+  .seite.ziehend { opacity:.4; }
+  .seite canvas { width:100%; height:auto; display:block; border-radius:4px;
+                  background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.18); }
+  .seite .nr { margin-top:7px; font-size:12px; color:var(--muted); text-align:center; }
+  .seite .quelle { font-size:11px; color:var(--muted); text-align:center;
+                   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .seite .haken { position:absolute; top:6px; right:6px; width:21px; height:21px;
+                  border-radius:50%; background:var(--accent); color:#fff; display:none;
+                  align-items:center; justify-content:center; font-size:13px; }
+  .seite.markiert .haken { display:flex; }
+  .laedt { color:var(--muted); padding:22px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PDF Werkzeug</h1>
+  <p>Seiten zusammenfügen, löschen, drehen und sortieren. Läuft komplett im Browser,
+     deine Dateien werden nirgendwo hochgeladen.</p>
+</header>
+
+<main>
+  <div id="ablage">
+    <strong>PDFs hierher ziehen</strong>
+    <span>oder klicken zum Auswählen. Mehrere Dateien gehen auch.</span>
+    <input type="file" id="dateiwahl" accept="application/pdf" multiple hidden>
+  </div>
+
+  <div id="leiste">
+    <span class="info" id="info"></span>
+    <button id="alle">Alle</button>
+    <button id="keine">Keine</button>
+    <button id="linksdrehen" disabled>↺ links</button>
+    <button id="rechtsdrehen" disabled>↻ rechts</button>
+    <button id="loeschen" class="gefahr" disabled>Löschen</button>
+    <button id="speichern" class="haupt">Speichern</button>
+  </div>
+
+  <div id="raster"></div>
+  <div class="laedt" id="laedt" hidden>lade ...</div>
+</main>
+
+<script src="lib/pdf-lib.min.js"></script>
+<script type="module">
+import * as pdfjs from './lib/pdfjs.min.mjs';
+pdfjs.GlobalWorkerOptions.workerSrc = './lib/pdfjs.worker.min.mjs';
+
+const $ = id => document.getElementById(id);
+
+// Hier liegt der ganze Zustand: eine Liste von Seiten.
+// Jede Seite weiss, aus welcher Datei sie kommt und welche Nummer sie dort hatte.
+let seiten = [];
+let dateien = [];   // { name, bytes }
+
+// ---------- Dateien einlesen ----------
+
+$('ablage').onclick = () => $('dateiwahl').click();
+$('dateiwahl').onchange = e => einlesen([...e.target.files]);
+
+['dragenter','dragover'].forEach(ev =>
+  $('ablage').addEventListener(ev, e => { e.preventDefault(); $('ablage').classList.add('drueber'); }));
+['dragleave','drop'].forEach(ev =>
+  $('ablage').addEventListener(ev, e => { e.preventDefault(); $('ablage').classList.remove('drueber'); }));
+$('ablage').addEventListener('drop', e =>
+  einlesen([...e.dataTransfer.files].filter(f => f.type === 'application/pdf')));
+
+async function einlesen(liste) {
+  if (!liste.length) return;
+  $('laedt').hidden = false;
+
+  for (const datei of liste) {
+    const bytes = new Uint8Array(await datei.arrayBuffer());
+    const dateiIndex = dateien.push({ name: datei.name, bytes }) - 1;
+
+    // pdf.js bekommt eine Kopie, weil es den Speicher sonst fuer sich beansprucht
+    const dok = await pdfjs.getDocument({ data: bytes.slice() }).promise;
+
+    for (let nr = 1; nr <= dok.numPages; nr++) {
+      seiten.push({ datei: dateiIndex, quelleNr: nr, drehung: 0, markiert: false });
+    }
+    // Vorschaubilder erst zeichnen, wenn die Seiten im Raster stehen
+    zeichnen();
+    for (let nr = 1; nr <= dok.numPages; nr++) {
+      const seite = await dok.getPage(nr);
+      const index = seiten.findIndex(s => s.datei === dateiIndex && s.quelleNr === nr);
+      const leinwand = document.querySelector(`[data-index="${index}"] canvas`);
+      if (!leinwand) continue;
+      const massstab = 150 / seite.getViewport({ scale: 1 }).width;
+      const sicht = seite.getViewport({ scale: massstab });
+      leinwand.width = sicht.width;
+      leinwand.height = sicht.height;
+      await seite.render({ canvasContext: leinwand.getContext('2d'), viewport: sicht }).promise;
+    }
+  }
+
+  $('laedt').hidden = true;
+  zeichnen();
+}
+
+// Mit ?demo in der Adresse laedt das Werkzeug die Beispieldateien von selbst.
+// Praktisch zum Ausprobieren, wenn man gerade kein PDF zur Hand hat.
+if (location.search.includes('demo')) {
+  (async () => {
+    const dateiListe = [];
+    for (const name of ['alpha.pdf', 'beta.pdf']) {
+      const blob = await (await fetch('test-pdfs/' + name)).blob();
+      dateiListe.push(new File([blob], name, { type: 'application/pdf' }));
+    }
+    einlesen(dateiListe);
+  })();
+}
+
+// ---------- Anzeigen ----------
+
+function zeichnen() {
+  const raster = $('raster');
+  const vorhandene = new Map([...raster.children].map(k => [k.dataset.schluessel, k]));
+  raster.innerHTML = '';
+
+  seiten.forEach((s, i) => {
+    const schluessel = s.datei + ':' + s.quelleNr;
+    let karte = vorhandene.get(schluessel);
+
+    if (!karte) {
+      karte = document.createElement('div');
+      karte.className = 'seite';
+      karte.draggable = true;
+      karte.dataset.schluessel = schluessel;
+      karte.innerHTML = `<div class="haken">✓</div><canvas></canvas>
+                         <div class="nr"></div><div class="quelle"></div>`;
+      karte.onclick = () => { s.markiert = !s.markiert; zeichnen(); };
+      karte.addEventListener('dragstart', e => {
+        e.dataTransfer.setData('text/plain', String([...raster.children].indexOf(karte)));
+        karte.classList.add('ziehend');
+      });
+      karte.addEventListener('dragend', () => karte.classList.remove('ziehend'));
+      karte.addEventListener('dragover', e => e.preventDefault());
+      karte.addEventListener('drop', e => {
+        e.preventDefault();
+        const von = parseInt(e.dataTransfer.getData('text/plain'), 10);
+        const nach = [...raster.children].indexOf(karte);
+        if (von === nach || isNaN(von)) return;
+        seiten.splice(nach, 0, seiten.splice(von, 1)[0]);
+        zeichnen();
+      });
+    }
+
+    karte.dataset.index = i;
+    karte.classList.toggle('markiert', s.markiert);
+    karte.querySelector('canvas').style.transform = `rotate(${s.drehung}deg)`;
+    karte.querySelector('.nr').textContent = `Seite ${i + 1}`;
+    karte.querySelector('.quelle').textContent = dateien[s.datei]?.name ?? '';
+    raster.appendChild(karte);
+  });
+
+  const markierte = seiten.filter(s => s.markiert).length;
+  $('leiste').style.display = seiten.length ? 'flex' : 'none';
+  $('info').textContent = seiten.length
+    ? `${seiten.length} Seiten aus ${dateien.length} ${dateien.length === 1 ? 'Datei' : 'Dateien'}`
+      + (markierte ? `, ${markierte} ausgewählt` : '')
+    : '';
+  ['linksdrehen','rechtsdrehen','loeschen'].forEach(id => $(id).disabled = markierte === 0);
+}
+
+// ---------- Bearbeiten ----------
+
+$('alle').onclick  = () => { seiten.forEach(s => s.markiert = true); zeichnen(); };
+$('keine').onclick = () => { seiten.forEach(s => s.markiert = false); zeichnen(); };
+
+function drehen(grad) {
+  seiten.filter(s => s.markiert).forEach(s => s.drehung = (s.drehung + grad + 360) % 360);
+  zeichnen();
+}
+$('linksdrehen').onclick  = () => drehen(-90);
+$('rechtsdrehen').onclick = () => drehen(90);
+
+$('loeschen').onclick = () => {
+  seiten = seiten.filter(s => !s.markiert);
+  zeichnen();
+};
+
+// ---------- Speichern ----------
+
+$('speichern').onclick = async () => {
+  if (!seiten.length) return;
+  $('speichern').disabled = true;
+  $('speichern').textContent = 'baue ...';
+
+  try {
+    const neu = await PDFLib.PDFDocument.create();
+
+    // Jede Quelldatei nur einmal oeffnen, nicht pro Seite
+    const geoeffnet = new Map();
+    for (const s of seiten) {
+      if (!geoeffnet.has(s.datei)) {
+        geoeffnet.set(s.datei, await PDFLib.PDFDocument.load(dateien[s.datei].bytes));
+      }
+    }
+
+    for (const s of seiten) {
+      const [kopie] = await neu.copyPages(geoeffnet.get(s.datei), [s.quelleNr - 1]);
+      if (s.drehung) {
+        const alt = kopie.getRotation().angle;
+        kopie.setRotation(PDFLib.degrees((alt + s.drehung) % 360));
+      }
+      neu.addPage(kopie);
+    }
+
+    const bytes = await neu.save();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+    a.download = 'zusammengefuegt.pdf';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (fehler) {
+    alert('Das hat nicht geklappt: ' + fehler.message);
+  }
+
+  $('speichern').disabled = false;
+  $('speichern').textContent = 'Speichern';
+};
+</script>
+</body>
+</html>
