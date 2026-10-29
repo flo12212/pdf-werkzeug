@@ -58,13 +58,51 @@
                   border-radius:50%; background:var(--accent); color:#fff; display:none;
                   align-items:center; justify-content:center; font-size:13px; }
   .seite.markiert .haken { display:flex; }
+  .seite .anzahl { position:absolute; top:6px; left:6px; display:none; padding:1px 7px;
+                   border-radius:10px; font-size:11px; font-weight:600;
+                   background:var(--card); color:var(--muted); border:1px solid var(--line); }
+  .seite .anzahl.da { display:block; }
+  .seite .anzahl.gefuellt { background:var(--accent); border-color:var(--accent); color:#fff; }
   .laedt { color:var(--muted); padding:22px 0; }
+
+  /* Ausfüllen */
+  #editor { position:fixed; inset:0; z-index:20; display:none; overflow:auto; background:var(--bg); }
+  #editor.offen { display:block; }
+  #editor .kopf { position:sticky; top:0; z-index:3; background:var(--bg); border-bottom:1px solid var(--line); }
+  #editor .kopf-innen { max-width:1100px; margin:0 auto; padding:14px 24px; display:flex;
+                        gap:10px 16px; flex-wrap:wrap; align-items:center; }
+  #editor .kopf .info { color:var(--muted); font-size:14px; margin-right:auto; }
+  #editor .kopf label { font-size:14px; color:var(--muted); display:flex; gap:6px; align-items:center; }
+  .legende { display:flex; gap:14px; font-size:13px; color:var(--muted); }
+  .legende i { display:inline-block; width:14px; height:10px; margin-right:5px; vertical-align:-1px;
+               border:1px solid #2563eb; background:rgba(37,99,235,.1); }
+  .legende i.erkannt { border-style:dashed; }
+  .legende i.frei { border-color:#16a34a; background:rgba(22,163,74,.1); }
+  #blaetter { max-width:1100px; margin:0 auto; padding:24px 24px 120px; display:flex;
+              flex-direction:column; align-items:center; gap:28px; }
+  .blatt { position:relative; background:#fff; box-shadow:0 2px 10px rgba(0,0,0,.25); cursor:crosshair; }
+  .blatt canvas { display:block; width:100%; height:100%; }
+  .blatt-nr { align-self:stretch; text-align:center; color:var(--muted); font-size:13px; margin-bottom:-18px; }
+  .feld { position:absolute; }
+  .feld input, .feld textarea, .feld select {
+    display:block; width:100%; height:100%; margin:0; padding:0 2px; resize:none; border-radius:2px;
+    border:1px solid rgba(37,99,235,.6); background:rgba(37,99,235,.08); color:#111;
+    font-family:Helvetica,Arial,sans-serif; line-height:1.2; cursor:text; }
+  .feld.erkannt input, .feld.erkannt textarea { border-style:dashed; }
+  .feld.frei input { border-color:rgba(22,163,74,.75); background:rgba(22,163,74,.08); }
+  .feld input:focus, .feld textarea:focus, .feld select:focus { outline:2px solid #2563eb; background:rgba(255,255,255,.92); }
+  .feld input[type=checkbox] { cursor:pointer; }
+  .feld .weg { position:absolute; top:-9px; right:-9px; width:18px; height:18px; padding:0; display:none;
+               border:0; border-radius:50%; background:var(--gefahr); color:#fff; font-size:11px; line-height:18px; }
+  .feld .weg:hover:not(:disabled) { color:#fff; opacity:.85; }
+  .feld:hover .weg, .feld:focus-within .weg { display:block; }
+  #blaetter.ohne-erkannt .feld.erkannt.leer { display:none; }
 </style>
 </head>
 <body>
 <header>
   <h1>PDF Werkzeug</h1>
-  <p>Seiten zusammenfügen, löschen, drehen und sortieren. Läuft komplett im Browser,
+  <p>Seiten zusammenfügen, löschen, drehen, sortieren und ausfüllen. Läuft komplett im Browser,
      deine Dateien werden nirgendwo hochgeladen.</p>
 </header>
 
@@ -82,12 +120,23 @@
     <button id="linksdrehen" disabled>↺ links</button>
     <button id="rechtsdrehen" disabled>↻ rechts</button>
     <button id="loeschen" class="gefahr" disabled>Löschen</button>
+    <button id="ausfuellen">Ausfüllen</button>
     <button id="speichern" class="haupt">Speichern</button>
   </div>
 
   <div id="raster"></div>
   <div class="laedt" id="laedt" hidden>lade ...</div>
 </main>
+
+<div id="editor">
+  <div class="kopf"><div class="kopf-innen">
+    <span class="info" id="editorinfo"></span>
+    <span class="legende"><span><i></i>Formularfeld</span><span><i class="erkannt"></i>erkannt</span><span><i class="frei"></i>eigenes</span></span>
+    <label><input type="checkbox" id="erkanntzeigen" checked> erkannte Lücken zeigen</label>
+    <button id="fertig" class="haupt">Fertig</button>
+  </div></div>
+  <div id="blaetter"></div>
+</div>
 
 <script src="lib/pdf-lib.min.js"></script>
 <script type="module">
@@ -97,9 +146,10 @@ pdfjs.GlobalWorkerOptions.workerSrc = './lib/pdfjs.worker.min.mjs';
 const $ = id => document.getElementById(id);
 
 // Hier liegt der ganze Zustand: eine Liste von Seiten.
-// Jede Seite weiss, aus welcher Datei sie kommt und welche Nummer sie dort hatte.
+// Jede Seite weiss, aus welcher Datei sie kommt und welche Nummer sie dort hatte,
+// dazu ihre Felder zum Ausfuellen.
 let seiten = [];
-let dateien = [];   // { name, bytes }
+let dateien = [];   // { name, bytes, dok, formular: Map(Feldname -> Wert), formularGeaendert }
 
 // ---------- Dateien einlesen ----------
 
@@ -116,22 +166,30 @@ $('ablage').addEventListener('drop', e =>
 async function einlesen(liste) {
   if (!liste.length) return;
   $('laedt').hidden = false;
+  $('ausfuellen').disabled = true;   // erst wenn alle Felder erkannt sind
 
   for (const datei of liste) {
     const bytes = new Uint8Array(await datei.arrayBuffer());
-    const dateiIndex = dateien.push({ name: datei.name, bytes }) - 1;
 
     // pdf.js bekommt eine Kopie, weil es den Speicher sonst fuer sich beansprucht
     const dok = await pdfjs.getDocument({ data: bytes.slice() }).promise;
+    const dateiIndex = dateien.push({ name: datei.name, bytes, dok,
+                                      formular: new Map(), formularGeaendert: false }) - 1;
 
     for (let nr = 1; nr <= dok.numPages; nr++) {
-      seiten.push({ datei: dateiIndex, quelleNr: nr, drehung: 0, markiert: false });
+      seiten.push({ datei: dateiIndex, quelleNr: nr, drehung: 0, markiert: false, felder: [] });
     }
     // Vorschaubilder erst zeichnen, wenn die Seiten im Raster stehen
     zeichnen();
     for (let nr = 1; nr <= dok.numPages; nr++) {
       const seite = await dok.getPage(nr);
-      const index = seiten.findIndex(s => s.datei === dateiIndex && s.quelleNr === nr);
+      const eintrag = seiten.find(s => s.datei === dateiIndex && s.quelleNr === nr);
+      try {
+        eintrag.felder = await felderErkennen(seite, dateien[dateiIndex]);
+      } catch (fehler) {
+        console.warn('Felder auf Seite', nr, 'nicht erkannt:', fehler);
+      }
+      const index = seiten.indexOf(eintrag);
       const leinwand = document.querySelector(`[data-index="${index}"] canvas`);
       if (!leinwand) continue;
       const massstab = 150 / seite.getViewport({ scale: 1 }).width;
@@ -143,21 +201,238 @@ async function einlesen(liste) {
   }
 
   $('laedt').hidden = true;
+  $('ausfuellen').disabled = false;
   zeichnen();
 }
 
 // Mit ?demo in der Adresse laedt das Werkzeug die Beispieldateien von selbst.
 // Praktisch zum Ausprobieren, wenn man gerade kein PDF zur Hand hat.
+// ?demo=formular laedt stattdessen das Beispiel mit Formularfeldern und Luecken.
 if (location.search.includes('demo')) {
   (async () => {
     const dateiListe = [];
-    for (const name of ['alpha.pdf', 'beta.pdf']) {
+    const namen = new URLSearchParams(location.search).get('demo') === 'formular'
+      ? ['formular.pdf'] : ['alpha.pdf', 'beta.pdf'];
+    for (const name of namen) {
       const blob = await (await fetch('test-pdfs/' + name)).blob();
       dateiListe.push(new File([blob], name, { type: 'application/pdf' }));
     }
     einlesen(dateiListe);
   })();
 }
+
+// ---------- Felder erkennen ----------
+// Drei Quellen: echte Formularfelder im PDF, leere Kaestchen und Luecken aus Punkten
+// oder Unterstrichen, wie sie auf Arbeitsblaettern stehen. Hat eine Seite echte
+// Formularfelder, wird nicht zusaetzlich geraten.
+// Alle Rechtecke sind PDF-Koordinaten [x1, y1, x2, y2], Ursprung unten links.
+
+const OPS = pdfjs.OPS;
+
+async function felderErkennen(seite, datei) {
+  const felder = [];
+  for (const a of await seite.getAnnotations()) {
+    if (a.subtype !== 'Widget' || a.readOnly || !a.fieldName) continue;
+    const rect = ordnen(a.rect);
+    let feld = null;
+    if (a.fieldType === 'Tx') {
+      feld = { typ: 'text', mehrzeilig: !!a.multiLine, start: a.fieldValue ?? '' };
+    } else if (a.fieldType === 'Btn' && a.checkBox) {
+      feld = { typ: 'haken', start: !!a.fieldValue && a.fieldValue !== 'Off' };
+    } else if (a.fieldType === 'Ch' && a.combo) {
+      feld = { typ: 'auswahl', start: [].concat(a.fieldValue ?? '')[0] ?? '',
+               optionen: (a.options || []).map(o => ({ wert: o.exportValue, text: o.displayValue })) };
+    }
+    if (!feld) continue;
+    // Gleichnamige Felder teilen sich den Wert, auch ueber Seiten hinweg
+    if (!datei.formular.has(a.fieldName)) datei.formular.set(a.fieldName, feld.start);
+    felder.push({ art: 'formular', name: a.fieldName, rect, dreh: seite.rotate, ...feld });
+  }
+  if (felder.length) return felder;
+
+  const dreh = seite.rotate;
+  const [liste, text] = await Promise.all([seite.getOperatorList(), seite.getTextContent()]);
+  const textKaesten = [];
+  for (const t of text.items) {
+    if (!t.str) continue;
+    // Text kann in jede Richtung laufen, auf gedrehten Seiten auch quer.
+    // u ist die Leserichtung, v zeigt nach oben.
+    const [a, b, c, d, e, f] = t.transform;
+    const laenge = Math.hypot(a, b) || 1;
+    const u = [a / laenge, b / laenge], v = [-u[1], u[0]];
+    if (Math.abs(u[0] * u[1]) > 1e-3) continue;   // schraeger Text bleibt aussen vor
+    const hoehe = Math.hypot(c, d) || t.height || 10;
+    const kasten = (von, bis, unten, oben) => ordnen([
+      e + u[0] * von + v[0] * unten, f + u[1] * von + v[1] * unten,
+      e + u[0] * bis + v[0] * oben, f + u[1] * bis + v[1] * oben]);
+    const anteil = t.width / t.str.length;
+    // Luecken: ab 5 Punkten oder 3 Unterstrichen am Stueck
+    for (const m of t.str.matchAll(/[.…·]{5,}|_{3,}/g)) {
+      const von = m.index * anteil, breite = m[0].length * anteil;
+      if (breite >= 20) felder.push(neuesFeld('erkannt', kasten(von, von + breite, -hoehe * 0.25, hoehe * 1.05), dreh));
+    }
+    // Fuer die Kaestchen zaehlt nur echter Text, nicht die Luecken selbst
+    if (t.str.replace(/[.…·_\s]/g, '')) textKaesten.push(kasten(0, t.width, 0, hoehe));
+  }
+  for (const r of kaestchenFinden(liste, seite.view, textKaesten, dreh)) felder.push(neuesFeld('erkannt', r, dreh));
+  return felder;
+}
+
+// dreh ist die Drehung, mit der das PDF die Seite anzeigt (0, 90, 180, 270).
+// Breite und Hoehe sind immer so gemeint, wie man die Seite sieht.
+function neuesFeld(art, rect, dreh = 0) {
+  return { art, typ: 'text', rect, dreh, mehrzeilig: sichtMasse(rect, dreh).hoehe > 34, wert: '' };
+}
+
+function sichtMasse([x1, y1, x2, y2], dreh) {
+  return dreh % 180 ? { breite: y2 - y1, hoehe: x2 - x1 } : { breite: x2 - x1, hoehe: y2 - y1 };
+}
+
+// Richtungen "nach rechts" und "nach oben", wie man die Seite sieht, in PDF-Koordinaten,
+// dazu die Ecke des Rechtecks, die man unten links sieht.
+function sichtAchsen([x1, y1, x2, y2], dreh) {
+  switch (dreh) {
+    case 90:  return { ursprung: [x2, y1], rechts: [0, 1],  oben: [-1, 0] };
+    case 180: return { ursprung: [x2, y2], rechts: [-1, 0], oben: [0, -1] };
+    case 270: return { ursprung: [x1, y2], rechts: [0, -1], oben: [1, 0] };
+    default:  return { ursprung: [x1, y1], rechts: [1, 0],  oben: [0, 1] };
+  }
+}
+
+// Geht die Zeichenbefehle der Seite durch und sammelt achsenparallele Rechtecke,
+// die gefuellt oder umrandet sind und in denen weder Text noch ein Bild steht.
+function kaestchenFinden(liste, sichtbar, textKaesten, dreh) {
+  const [vx1, vy1, vx2, vy2] = sichtbar;
+  const seitenFlaeche = (vx2 - vx1) * (vy2 - vy1);
+  const funde = [], bilder = [];
+  let zustand = { ctm: [1, 0, 0, 1, 0, 0], fuellung: '#000000' };
+  const stapel = [];
+  let pfad = [];
+
+  for (let i = 0; i < liste.fnArray.length; i++) {
+    const fn = liste.fnArray[i], args = liste.argsArray[i];
+    switch (fn) {
+      case OPS.save: stapel.push({ ...zustand }); break;
+      case OPS.restore: zustand = stapel.pop() ?? zustand; break;
+      case OPS.transform: zustand.ctm = mal(zustand.ctm, args); break;
+      case OPS.paintFormXObjectBegin:
+        stapel.push({ ...zustand });
+        if (args[0]) zustand.ctm = mal(zustand.ctm, args[0]);
+        break;
+      case OPS.paintFormXObjectEnd: zustand = stapel.pop() ?? zustand; break;
+      case OPS.setFillRGBColor:
+        zustand.fuellung = typeof args[0] === 'string' ? args[0].toLowerCase()
+          : '#' + args.slice(0, 3).map(v => v.toString(16).padStart(2, '0')).join('');
+        break;
+      case OPS.constructPath: pfad = rechteckeAusPfad(args, zustand.ctm); break;
+      case OPS.fill: case OPS.eoFill:
+        // Weisse Flaechen ohne Rand sind meist nur Hintergrund
+        if (zustand.fuellung !== '#ffffff') funde.push(...pfad);
+        pfad = []; break;
+      case OPS.stroke: case OPS.closeStroke: case OPS.fillStroke: case OPS.eoFillStroke:
+      case OPS.closeFillStroke: case OPS.closeEOFillStroke:
+        funde.push(...pfad); pfad = []; break;
+      case OPS.endPath: pfad = []; break;
+      case OPS.paintImageXObject: case OPS.paintInlineImageXObject: case OPS.paintImageMaskXObject: {
+        // Bilder werden ins Einheitsquadrat gemalt, die Matrix bringt sie an ihren Platz
+        const [a, b, c, d, e, f] = zustand.ctm;
+        const ecken = [[0, 0], [1, 0], [0, 1], [1, 1]].map(([x, y]) => [a * x + c * y + e, b * x + d * y + f]);
+        bilder.push([Math.min(...ecken.map(p => p[0])), Math.min(...ecken.map(p => p[1])),
+                     Math.max(...ecken.map(p => p[0])), Math.max(...ecken.map(p => p[1]))]);
+        break;
+      }
+    }
+  }
+
+  const passend = funde.filter(r => {
+    const { breite, hoehe } = sichtMasse(r, dreh);
+    return breite >= 30 && hoehe >= 11 && hoehe <= 260 && breite * hoehe < seitenFlaeche * 0.35;
+  })
+    .filter(r => anteilInnen(r, sichtbar) > 0.9)                       // Beschnittrand, Druckmarken
+    .filter(r => !textKaesten.some(t => anteilInnen(t, r) > 0.5))
+    // Rahmen um Fotos raus, ein Bild, das nur in den Kasten ragt, aber nicht
+    .filter(r => !bilder.some(bild => anteilInnen(r, bild) > 0.6 || anteilInnen(bild, r) > 0.5));
+
+  // Doppelte (Fuellung und Rand einzeln gezeichnet) und umschliessende Kaesten raus
+  passend.sort((a, b) => flaeche(a) - flaeche(b));
+  const behalten = [];
+  for (const r of passend) {
+    if (behalten.some(k => anteilInnen(k, r) > 0.9)) continue;
+    behalten.push(r);
+  }
+  return behalten;
+}
+
+function rechteckeAusPfad([ops, werte], ctm) {
+  const rechtecke = [], punkte = [];
+  const zaehler = { kurven: 0, linien: 0 };
+  let j = 0;
+  for (const op of ops) {
+    if (op === OPS.rectangle) {
+      const [x, y, b, h] = werte.slice(j, j + 4); j += 4;
+      const r = abbilden(ctm, [[x, y], [x + b, y], [x + b, y + h], [x, y + h]]);
+      if (r) rechtecke.push(r);
+    } else if (op === OPS.moveTo || op === OPS.lineTo) {
+      if (op === OPS.lineTo) zaehler.linien++;
+      punkte.push([werte[j], werte[j + 1]]); j += 2;
+    } else if (op === OPS.curveTo || op === OPS.curveTo2 || op === OPS.curveTo3) {
+      const n = op === OPS.curveTo ? 6 : 4;
+      for (let k = 0; k < n; k += 2) punkte.push([werte[j + k], werte[j + k + 1]]);
+      j += n;
+      zaehler.kurven++;
+    } else if (op !== OPS.closePath) {
+      return [];
+    }
+  }
+  // Abgerundetes Rechteck: vier Ecken als Kurven, dazwischen gerade Kanten,
+  // und alle Punkte liegen nah am umgebenden Rahmen. Kreise haben keine Kanten.
+  if (zaehler.kurven && zaehler.kurven <= 8 && zaehler.linien >= 2) {
+    const r = abbilden(ctm, punkte);
+    if (!r) return rechtecke;
+    const rahmen = ordnen([Math.min(...punkte.map(p => p[0])), Math.min(...punkte.map(p => p[1])),
+                           Math.max(...punkte.map(p => p[0])), Math.max(...punkte.map(p => p[1]))]);
+    const spiel = Math.min(rahmen[2] - rahmen[0], rahmen[3] - rahmen[1]) * 0.35;
+    const amRand = punkte.every(([x, y]) =>
+      Math.min(x - rahmen[0], rahmen[2] - x) <= spiel || Math.min(y - rahmen[1], rahmen[3] - y) <= spiel);
+    if (amRand) rechtecke.push(r);
+    return rechtecke;
+  }
+  if (zaehler.kurven) return rechtecke;
+  if (punkte.length === 4 || punkte.length === 5) {
+    const zu = punkte.length === 4 ? [...punkte, punkte[0]] : punkte;
+    const gerade = zu.slice(1).every((p, k) => p[0] === zu[k][0] || p[1] === zu[k][1]);
+    if (gerade) {
+      const r = abbilden(ctm, punkte.slice(0, 4));
+      if (r) rechtecke.push(r);
+    }
+  }
+  return rechtecke;
+}
+
+// Wendet die Matrix auf die Ecken an. Nur wenn das Ergebnis noch achsenparallel ist
+// (keine Schraege), gibt es ein Rechteck zurueck.
+function abbilden([a, b, c, d, e, f], ecken) {
+  const null_ = v => Math.abs(v) < 1e-6;
+  if (!((null_(b) && null_(c)) || (null_(a) && null_(d)))) return null;
+  const p = ecken.map(([x, y]) => [a * x + c * y + e, b * x + d * y + f]);
+  return [Math.min(...p.map(q => q[0])), Math.min(...p.map(q => q[1])),
+          Math.max(...p.map(q => q[0])), Math.max(...p.map(q => q[1]))];
+}
+
+const mal = ([a, b, c, d, e, f], [g, h, i, j, k, l]) =>
+  [a * g + c * h, b * g + d * h, a * i + c * j, b * i + d * j, a * k + c * l + e, b * k + d * l + f];
+const ordnen = ([x1, y1, x2, y2]) =>
+  [Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2)];
+const flaeche = ([x1, y1, x2, y2]) => Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+// Welcher Anteil von a liegt in b?
+function anteilInnen(a, b) {
+  const schnitt = [Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.min(a[2], b[2]), Math.min(a[3], b[3])];
+  return flaeche(a) ? flaeche(schnitt) / flaeche(a) : 0;
+}
+
+const istGefuellt = (f, datei) =>
+  f.art === 'formular' ? datei.formular.get(f.name) !== f.start && !!datei.formular.get(f.name)
+                       : !!f.wert.trim();
 
 // ---------- Anzeigen ----------
 
@@ -175,7 +450,7 @@ function zeichnen() {
       karte.className = 'seite';
       karte.draggable = true;
       karte.dataset.schluessel = schluessel;
-      karte.innerHTML = `<div class="haken">✓</div><canvas></canvas>
+      karte.innerHTML = `<div class="haken">✓</div><div class="anzahl"></div><canvas></canvas>
                          <div class="nr"></div><div class="quelle"></div>`;
       karte.onclick = () => { s.markiert = !s.markiert; zeichnen(); };
       karte.addEventListener('dragstart', e => {
@@ -199,6 +474,13 @@ function zeichnen() {
     karte.querySelector('canvas').style.transform = `rotate(${s.drehung}deg)`;
     karte.querySelector('.nr').textContent = `Seite ${i + 1}`;
     karte.querySelector('.quelle').textContent = dateien[s.datei]?.name ?? '';
+    const anzahl = karte.querySelector('.anzahl');
+    const gefuellt = s.felder.filter(f => istGefuellt(f, dateien[s.datei])).length;
+    anzahl.classList.toggle('da', s.felder.length > 0);
+    anzahl.classList.toggle('gefuellt', gefuellt > 0);
+    anzahl.textContent = gefuellt ? `${gefuellt}/${s.felder.length} ausgefüllt`
+                                  : `${s.felder.length} ${s.felder.length === 1 ? 'Feld' : 'Felder'}`;
+    anzahl.title = 'Felder zum Ausfüllen, über „Ausfüllen“ bearbeiten';
     raster.appendChild(karte);
   });
 
@@ -228,6 +510,150 @@ $('loeschen').onclick = () => {
   zeichnen();
 };
 
+// ---------- Ausfuellen ----------
+// Zeigt die markierten Seiten (oder alle) gross an und legt Eingabefelder darueber.
+// Ein Klick auf eine freie Stelle der Seite setzt ein eigenes Textfeld.
+
+$('ausfuellen').onclick = async () => {
+  if ($('editor').classList.contains('offen')) return;
+  const lauf = ++editorLauf;
+  const auswahl = seiten.filter(s => s.markiert);
+  const liste = auswahl.length ? auswahl : seiten;
+  $('editor').classList.add('offen');
+  document.body.style.overflow = 'hidden';
+  const blaetter = $('blaetter');
+  blaetter.innerHTML = '';
+  const breite = Math.min(900, blaetter.clientWidth - 48);
+
+  for (const s of liste) {
+    const seite = await dateien[s.datei].dok.getPage(s.quelleNr);
+    if (lauf !== editorLauf) return;   // inzwischen geschlossen
+    const sicht = seite.getViewport({ scale: breite / seite.getViewport({ scale: 1 }).width });
+    const nr = document.createElement('div');
+    nr.className = 'blatt-nr';
+    nr.textContent = `Seite ${seiten.indexOf(s) + 1} · ${dateien[s.datei].name}`;
+    const blatt = document.createElement('div');
+    blatt.className = 'blatt';
+    blatt.style.width = sicht.width + 'px';
+    blatt.style.height = sicht.height + 'px';
+    const leinwand = document.createElement('canvas');
+    blatt.appendChild(leinwand);
+    blaetter.append(nr, blatt);
+
+    for (const f of s.felder) feldEinsetzen(blatt, sicht, s, f);
+    blatt.addEventListener('click', e => {
+      if (e.target !== leinwand) return;
+      const kasten = blatt.getBoundingClientRect();
+      const [px, py] = sicht.convertToPdfPoint(e.clientX - kasten.left, e.clientY - kasten.top);
+      // 160 breit und 16 hoch, so wie man die Seite sieht, der Klick ist links in der Mitte
+      const { rechts, oben } = sichtAchsen([0, 0, 0, 0], seite.rotate);
+      const ecke = (r, o) => [px + rechts[0] * r + oben[0] * o, py + rechts[1] * r + oben[1] * o];
+      const [a, b] = [ecke(0, -8), ecke(160, 8)];
+      const f = neuesFeld('frei', ordnen([a[0], a[1], b[0], b[1]]), seite.rotate);
+      s.felder.push(f);
+      feldEinsetzen(blatt, sicht, s, f).querySelector('input').focus();
+      editorInfo(liste);
+    });
+
+    // Gestochen scharf auch auf hochaufloesenden Bildschirmen. Formularfelder malt pdf.js
+    // dabei nicht mit, die liegen ja als Eingabefelder darueber.
+    const dpr = window.devicePixelRatio || 1;
+    const scharf = seite.getViewport({ scale: sicht.scale * dpr });
+    leinwand.width = scharf.width;
+    leinwand.height = scharf.height;
+    await seite.render({ canvasContext: leinwand.getContext('2d'), viewport: scharf,
+                         annotationMode: pdfjs.AnnotationMode.ENABLE_FORMS }).promise;
+  }
+  editorInfo(liste);
+};
+
+function feldEinsetzen(blatt, sicht, s, f) {
+  const datei = dateien[s.datei];
+  const [x1, y1, x2, y2] = ordnen(sicht.convertToViewportRectangle(f.rect));
+  const huelle = document.createElement('div');
+  huelle.className = 'feld ' + f.art;
+  Object.assign(huelle.style, { left: x1 + 'px', top: y1 + 'px', width: (x2 - x1) + 'px', height: (y2 - y1) + 'px' });
+
+  let eingabe;
+  if (f.typ === 'haken') {
+    eingabe = document.createElement('input');
+    eingabe.type = 'checkbox';
+    eingabe.checked = !!datei.formular.get(f.name);
+  } else if (f.typ === 'auswahl') {
+    eingabe = document.createElement('select');
+    for (const o of [{ wert: '', text: '' }, ...f.optionen]) eingabe.add(new Option(o.text, o.wert));
+    eingabe.value = datei.formular.get(f.name) ?? '';
+  } else {
+    eingabe = document.createElement(f.mehrzeilig ? 'textarea' : 'input');
+    eingabe.value = f.art === 'formular' ? datei.formular.get(f.name) ?? '' : f.wert;
+    eingabe.style.fontSize = schriftGroesse(f) * sicht.scale + 'px';
+  }
+  eingabe.spellcheck = false;
+  eingabe.addEventListener('input', () => {
+    const wert = f.typ === 'haken' ? eingabe.checked : eingabe.value;
+    if (f.art === 'formular') {
+      datei.formular.set(f.name, wert);
+      datei.formularGeaendert = true;
+      // Gleichnamige Felder auf derselben Ansicht mitziehen
+      document.querySelectorAll('#blaetter .feld.formular').forEach(h => {
+        if (h !== huelle && h.feld?.name === f.name && h.datei === datei) h.uebernehmen(wert);
+      });
+    } else {
+      f.wert = wert;
+      huelle.classList.toggle('leer', !wert.trim());
+    }
+  });
+  eingabe.addEventListener('change', () => eingabe.dispatchEvent(new Event('input')));
+  huelle.feld = f;
+  huelle.datei = datei;
+  huelle.uebernehmen = wert => f.typ === 'haken' ? eingabe.checked = wert : eingabe.value = wert;
+  huelle.appendChild(eingabe);
+  huelle.classList.toggle('leer', f.art !== 'formular' && !f.wert.trim());
+
+  if (f.art !== 'formular') {
+    const weg = document.createElement('button');
+    weg.className = 'weg';
+    weg.textContent = '✕';
+    weg.title = 'Feld entfernen';
+    weg.onclick = e => {
+      e.stopPropagation();
+      s.felder.splice(s.felder.indexOf(f), 1);
+      huelle.remove();
+    };
+    huelle.appendChild(weg);
+  }
+  blatt.appendChild(huelle);
+  return huelle;
+}
+
+function schriftGroesse(f) {
+  const { hoehe } = sichtMasse(f.rect, f.dreh ?? 0);
+  return f.mehrzeilig ? 10 : Math.max(6, Math.min(11, hoehe * 0.62));
+}
+
+function editorInfo(liste) {
+  const zahl = art => liste.reduce((n, s) => n + s.felder.filter(f => f.art === art).length, 0);
+  const teile = [['formular', 'Formularfelder'], ['erkannt', 'erkannt'], ['frei', 'eigene']]
+    .filter(([art]) => zahl(art)).map(([art, wort]) => `${zahl(art)} ${wort}`);
+  $('editorinfo').textContent = `${liste.length} ${liste.length === 1 ? 'Seite' : 'Seiten'}`
+    + (teile.length ? ', ' + teile.join(', ') : ', keine Felder erkannt')
+    + '. Klick auf eine freie Stelle setzt ein Textfeld.';
+}
+
+let editorLauf = 0;
+function editorZu() {
+  editorLauf++;
+  $('editor').classList.remove('offen');
+  $('blaetter').innerHTML = '';
+  document.body.style.overflow = '';
+  zeichnen();
+}
+$('fertig').onclick = editorZu;
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('editor').classList.contains('offen')) editorZu();
+});
+$('erkanntzeigen').onchange = e => $('blaetter').classList.toggle('ohne-erkannt', !e.target.checked);
+
 // ---------- Speichern ----------
 
 $('speichern').onclick = async () => {
@@ -240,14 +666,28 @@ $('speichern').onclick = async () => {
 
     // Jede Quelldatei nur einmal oeffnen, nicht pro Seite
     const geoeffnet = new Map();
+    const nichtUebernommen = new Map();   // Datei -> Feldnamen, die als Text aufgedruckt werden
     for (const s of seiten) {
       if (!geoeffnet.has(s.datei)) {
-        geoeffnet.set(s.datei, await PDFLib.PDFDocument.load(dateien[s.datei].bytes));
+        const quelle = await PDFLib.PDFDocument.load(dateien[s.datei].bytes);
+        if (dateien[s.datei].formularGeaendert) {
+          nichtUebernommen.set(s.datei, await formularUebernehmen(quelle, dateien[s.datei].formular));
+        }
+        geoeffnet.set(s.datei, quelle);
       }
     }
 
+    const schrift = await neu.embedFont(PDFLib.StandardFonts.Helvetica);
     for (const s of seiten) {
       const [kopie] = await neu.copyPages(geoeffnet.get(s.datei), [s.quelleNr - 1]);
+      const offen = nichtUebernommen.get(s.datei) ?? new Set();
+      for (const f of s.felder) {
+        if (f.art !== 'formular' && f.wert.trim()) textAufdrucken(kopie, f, f.wert, schrift);
+        else if (f.art === 'formular' && offen.has(f.name) && f.typ !== 'haken') {
+          const wert = String(dateien[s.datei].formular.get(f.name) ?? '');
+          if (wert.trim()) textAufdrucken(kopie, f, wert, schrift);
+        }
+      }
       if (s.drehung) {
         const alt = kopie.getRotation().angle;
         kopie.setRotation(PDFLib.degrees((alt + s.drehung) % 360));
@@ -268,6 +708,92 @@ $('speichern').onclick = async () => {
   $('speichern').disabled = false;
   $('speichern').textContent = 'Speichern';
 };
+
+// Traegt die Werte in die echten Formularfelder ein und macht sie danach flach,
+// also zu normalem Seiteninhalt. Das muss sein, weil beim Kopieren in die neue Datei
+// das Formular selbst verloren geht. Gibt die Felder zurueck, bei denen das nicht
+// geklappt hat, die werden dann als Text aufgedruckt.
+async function formularUebernehmen(dok, werte) {
+  const offen = new Set();
+  const form = dok.getForm();
+  const schrift = await dok.embedFont(PDFLib.StandardFonts.Helvetica);
+  for (const [name, wert] of werte) {
+    try {
+      const feld = form.getField(name);
+      if (feld instanceof PDFLib.PDFTextField) {
+        // Mehrzeilige Felder stehen oft auf automatischer Groesse, dann wird ein
+        // kurzer Text riesig. 10 pt passt zu dem, was man beim Tippen gesehen hat.
+        if (feld.isMultiline()) feld.setFontSize(10);
+        feld.setText(fuerSchrift(String(wert ?? ''), schrift));
+      }
+      else if (feld instanceof PDFLib.PDFCheckBox) wert ? feld.check() : feld.uncheck();
+      else if (feld instanceof PDFLib.PDFDropdown && wert) feld.select(String(wert));
+    } catch (fehler) {
+      console.warn('Formularfeld', name, 'nicht übernommen:', fehler);
+      offen.add(name);
+    }
+  }
+  try {
+    form.updateFieldAppearances(schrift);
+    form.flatten({ updateFieldAppearances: false });
+  } catch (fehler) {
+    console.warn('Formular ließ sich nicht flach machen:', fehler);
+    for (const name of werte.keys()) offen.add(name);
+  }
+  return offen;
+}
+
+// Die Standardschrift kennt nur westeuropaeische Zeichen. Pfeile und Co. werden
+// ersetzt, sonst bricht pdf-lib beim Schreiben ab.
+function fuerSchrift(text, schrift) {
+  return [...text].map(z => {
+    if (z === '\n') return z;
+    try { schrift.encodeText(z); return z; } catch { return z === '→' ? '->' : z === '←' ? '<-' : '?'; }
+  }).join('');
+}
+
+// Schreibt Text in ein Rechteck der Seite. Einzeilig wird die Schrift kleiner, bis
+// der Text passt, mehrzeilig wird an Wortgrenzen umgebrochen.
+// Gerechnet wird in Sicht-Koordinaten (r nach rechts, o nach oben, ab der Ecke unten
+// links), damit der Text auch auf gedrehten Seiten aufrecht steht.
+function textAufdrucken(seite, f, text, schrift) {
+  const dreh = f.dreh ?? 0;
+  const masse = sichtMasse(f.rect, dreh);
+  const { ursprung, rechts, oben } = sichtAchsen(f.rect, dreh);
+  const schreiben = (zeile, r, o, size) => seite.drawText(zeile, {
+    x: ursprung[0] + rechts[0] * r + oben[0] * o,
+    y: ursprung[1] + rechts[1] * r + oben[1] * o,
+    rotate: PDFLib.degrees(dreh), size, font: schrift, color: PDFLib.rgb(0, 0, 0) });
+  const breite = masse.breite - 4;
+  let groesse = schriftGroesse(f);
+  const zeilen = fuerSchrift(String(text), schrift).split('\n');
+
+  if (!f.mehrzeilig) {
+    const zeile = zeilen.join(' ');
+    while (groesse > 5 && schrift.widthOfTextAtSize(zeile, groesse) > breite) groesse -= 0.5;
+    schreiben(zeile, 2, (masse.hoehe - groesse) / 2 + groesse * 0.22, groesse);
+    return;
+  }
+
+  const umbrochen = [];
+  for (const absatz of zeilen) {
+    let aktuell = '';
+    for (const wort of absatz.split(' ')) {
+      const probe = aktuell ? aktuell + ' ' + wort : wort;
+      if (aktuell && schrift.widthOfTextAtSize(probe, groesse) > breite) {
+        umbrochen.push(aktuell);
+        aktuell = wort;
+      } else aktuell = probe;
+    }
+    umbrochen.push(aktuell);
+  }
+  let o = masse.hoehe - 2 - groesse * 0.9;
+  for (const zeile of umbrochen) {
+    if (o < 0) break;
+    schreiben(zeile, 2, o, groesse);
+    o -= groesse * 1.2;
+  }
+}
 </script>
 </body>
 </html>
